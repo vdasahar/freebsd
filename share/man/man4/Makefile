@@ -54,7 +54,6 @@ MAN=	aac.4 \
 	${_aout.4} \
 	${_apic.4} \
 	arcmsr.4 \
-	${_armv8crypto.4} \
 	${_asmc.4} \
 	ata.4 \
 	ath.4 \
@@ -70,16 +69,9 @@ MAN=	aac.4 \
 	audit.4 \
 	auditpipe.4 \
 	aue.4 \
-	${_aw_gpio.4} \
-	${_aw_mmc.4} \
-	${_aw_rtc.4} \
-	${_aw_sid.4} \
-	${_aw_spi.4} \
-	${_aw_syscon.4} \
 	axe.4 \
 	axge.4 \
 	bce.4 \
-	${_bcm283x_pwm.4} \
 	bcma.4 \
 	bfe.4 \
 	bge.4 \
@@ -204,12 +196,14 @@ MAN=	aac.4 \
 	${_hv_vmbus.4} \
 	${_hv_vss.4} \
 	hwpmc.4 \
+	iavf.4 \
 	ichsmb.4 \
 	${_ichwd.4} \
 	icmp.4 \
 	icmp6.4 \
 	ida.4 \
 	if_ipsec.4 \
+	iflib.4 \
 	ifmib.4 \
 	ig4.4 \
 	igmp.4 \
@@ -247,9 +241,7 @@ MAN=	aac.4 \
 	iwnfw.4 \
 	ixgbe.4 \
 	ixl.4 \
-	ixlv.4 \
 	jedec_dimm.4 \
-	jedec_ts.4 \
 	jme.4 \
 	joy.4 \
 	kbdmux.4 \
@@ -444,10 +436,6 @@ MAN=	aac.4 \
 	re.4 \
 	rgephy.4 \
 	rights.4 \
-	${_rk_gpio.4} \
-	${_rk_grf.4} \
-	${_rk_i2c.4} \
-	${_rk_pinctrl.4} \
 	rl.4 \
 	rndtest.4 \
 	route.4 \
@@ -517,6 +505,7 @@ MAN=	aac.4 \
 	snd_via82c686.4 \
 	snd_vibes.4 \
 	snp.4 \
+	spigen.4 \
 	${_spkr.4} \
 	splash.4 \
 	sppp.4 \
@@ -680,7 +669,7 @@ MLINKS+=ixgbe.4 ix.4
 MLINKS+=ixgbe.4 if_ix.4
 MLINKS+=ixgbe.4 if_ixgbe.4
 MLINKS+=ixl.4 if_ixl.4
-MLINKS+=ixlv.4 if_ixlv.4
+MLINKS+=iavf.4 if_iavf.4
 MLINKS+=jme.4 if_jme.4
 MLINKS+=kue.4 if_kue.4
 MLINKS+=lagg.4 trunk.4
@@ -761,23 +750,6 @@ MLINKS+=wi.4 if_wi.4
 MLINKS+=${_wpi.4} ${_if_wpi.4}
 MLINKS+=xe.4 if_xe.4
 MLINKS+=xl.4 if_xl.4
-
-.if ${MACHINE_CPUARCH} == "aarch64"
-_armv8crypto.4=	armv8crypto.4
-_rk_gpio.4=	rk_gpio.4
-_rk_grf.4=	rk_grf.4
-_rk_i2c.4=	rk_i2c.4
-_rk_pinctrl.4=	rk_pinctrl.4
-.endif
-
-.if ${MACHINE_CPUARCH} == "arm" || ${MACHINE_CPUARCH} == "aarch64"
-_aw_gpio.4=	aw_gpio.4
-_aw_mmc.4=	aw_mmc.4
-_aw_rtc.4=	aw_rtc.4
-_aw_sid.4=	aw_sid.4
-_aw_spi.4=	aw_spi.4
-_aw_syscon.4=	aw_syscon.4
-.endif
 
 .if ${MACHINE_CPUARCH} == "amd64" || ${MACHINE_CPUARCH} == "i386"
 _acpi_asus.4=	acpi_asus.4
@@ -896,13 +868,18 @@ _nvd.4= 	nvd.4
 _nvme.4=	nvme.4
 .endif
 
-.if ${MACHINE_ARCH:Marmv[67]*} != "" || ${MACHINE_CPUARCH} == "aarch64"
-_bcm283x_pwm.4=  bcm283x_pwm.4
+.if empty(MAN_ARCH)
+__arches=	${MACHINE} ${MACHINE_ARCH} ${MACHINE_CPUARCH}
+.elif ${MAN_ARCH} == "all"
+__arches=	${:!/bin/sh -c "/bin/ls -d ${.CURDIR}/man4.*"!:E}
+.else
+__arches=	${MAN_ARCH}
 .endif
-
-.if exists(${.CURDIR}/man4.${MACHINE_CPUARCH})
-SUBDIR=	man4.${MACHINE_CPUARCH}
+.for __arch in ${__arches:O:u}
+.if exists(${.CURDIR}/man4.${__arch})
+SUBDIR+=	man4.${__arch}
 .endif
+.endfor
 
 .if ${MK_BLUETOOTH} != "no"
 MAN+=		ng_bluetooth.4
@@ -920,7 +897,14 @@ _dtrace_provs=	dtrace_io.4 \
 		dtrace_sched.4 \
 		dtrace_sctp.4 \
 		dtrace_tcp.4 \
-		dtrace_udp.4
+		dtrace_udp.4 \
+		dtrace_udplite.4
+.endif
+
+.if ${MK_EFI} != "no"
+MAN+=		efidev.4
+
+MLINKS+=	efidev.4 efirtc.4
 .endif
 
 .if ${MK_ISCSI} != "no"

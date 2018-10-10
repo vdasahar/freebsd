@@ -84,6 +84,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_pageout.h>
 #include <vm/vm_param.h>
 #include <vm/vm_phys.h>
+#include <vm/vm_pagequeue.h>
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_extern.h>
@@ -229,8 +230,10 @@ void	uma_startup2(void);
 
 static void *noobj_alloc(uma_zone_t, vm_size_t, int, uint8_t *, int);
 static void *page_alloc(uma_zone_t, vm_size_t, int, uint8_t *, int);
+static void *pcpu_page_alloc(uma_zone_t, vm_size_t, int, uint8_t *, int);
 static void *startup_alloc(uma_zone_t, vm_size_t, int, uint8_t *, int);
 static void page_free(void *, vm_size_t, uint8_t);
+static void pcpu_page_free(void *, vm_size_t, uint8_t);
 static uma_slab_t keg_alloc_slab(uma_keg_t, uma_zone_t, int, int);
 static void cache_drain(uma_zone_t);
 static void bucket_drain(uma_zone_t, uma_bucket_t);
@@ -1167,9 +1170,60 @@ page_alloc(uma_zone_t zone, vm_size_t bytes, int domain, uint8_t *pflag,
 	void *p;	/* Returned page */
 
 	*pflag = UMA_SLAB_KERNEL;
-	p = (void *) kmem_malloc_domain(kernel_arena, domain, bytes, wait);
+	p = (void *) kmem_malloc_domain(domain, bytes, wait);
 
 	return (p);
+}
+
+static void *
+pcpu_page_alloc(uma_zone_t zone, vm_size_t bytes, int domain, uint8_t *pflag,
+    int wait)
+{
+	struct pglist alloctail;
+	vm_offset_t addr, zkva;
+	int cpu, flags;
+	vm_page_t p, p_next;
+#ifdef NUMA
+	struct pcpu *pc;
+#endif
+
+	MPASS(bytes == (mp_maxid + 1) * PAGE_SIZE);
+
+	TAILQ_INIT(&alloctail);
+	flags = VM_ALLOC_SYSTEM | VM_ALLOC_WIRED | VM_ALLOC_NOOBJ |
+	    malloc2vm_flags(wait);
+	*pflag = UMA_SLAB_KERNEL;
+	for (cpu = 0; cpu <= mp_maxid; cpu++) {
+		if (CPU_ABSENT(cpu)) {
+			p = vm_page_alloc(NULL, 0, flags);
+		} else {
+#ifndef NUMA
+			p = vm_page_alloc(NULL, 0, flags);
+#else
+			pc = pcpu_find(cpu);
+			p = vm_page_alloc_domain(NULL, 0, pc->pc_domain, flags);
+			if (__predict_false(p == NULL))
+				p = vm_page_alloc(NULL, 0, flags);
+#endif
+		}
+		if (__predict_false(p == NULL))
+			goto fail;
+		TAILQ_INSERT_TAIL(&alloctail, p, listq);
+	}
+	if ((addr = kva_alloc(bytes)) == 0)
+		goto fail;
+	zkva = addr;
+	TAILQ_FOREACH(p, &alloctail, listq) {
+		pmap_qenter(zkva, &p, 1);
+		zkva += PAGE_SIZE;
+	}
+	return ((void*)addr);
+ fail:
+	TAILQ_FOREACH_SAFE(p, &alloctail, listq, p_next) {
+		vm_page_unwire(p, PQ_NONE);
+		vm_page_free(p);
+	}
+	return (NULL);
 }
 
 /*
@@ -1247,15 +1301,43 @@ noobj_alloc(uma_zone_t zone, vm_size_t bytes, int domain, uint8_t *flags,
 static void
 page_free(void *mem, vm_size_t size, uint8_t flags)
 {
-	struct vmem *vmem;
 
-	if (flags & UMA_SLAB_KERNEL)
-		vmem = kernel_arena;
-	else
+	if ((flags & UMA_SLAB_KERNEL) == 0)
 		panic("UMA: page_free used with invalid flags %x", flags);
 
-	kmem_free(vmem, (vm_offset_t)mem, size);
+	kmem_free((vm_offset_t)mem, size);
 }
+
+/*
+ * Frees pcpu zone allocations
+ *
+ * Arguments:
+ *	mem   A pointer to the memory to be freed
+ *	size  The size of the memory being freed
+ *	flags The original p->us_flags field
+ *
+ * Returns:
+ *	Nothing
+ */
+static void
+pcpu_page_free(void *mem, vm_size_t size, uint8_t flags)
+{
+	vm_offset_t sva, curva;
+	vm_paddr_t paddr;
+	vm_page_t m;
+
+	MPASS(size == (mp_maxid+1)*PAGE_SIZE);
+	sva = (vm_offset_t)mem;
+	for (curva = sva; curva < sva + size; curva += PAGE_SIZE) {
+		paddr = pmap_kextract(curva);
+		m = PHYS_TO_VM_PAGE(paddr);
+		vm_page_unwire(m, PQ_NONE);
+		vm_page_free(m);
+	}
+	pmap_qremove(sva, size >> PAGE_SHIFT);
+	kva_free(sva, size);
+}
+
 
 /*
  * Zero fill initializer
@@ -1290,9 +1372,8 @@ keg_small_init(uma_keg_t keg)
 	if (keg->uk_flags & UMA_ZONE_PCPU) {
 		u_int ncpus = (mp_maxid + 1) ? (mp_maxid + 1) : MAXCPU;
 
-		slabsize = sizeof(struct pcpu);
-		keg->uk_ppera = howmany(ncpus * sizeof(struct pcpu),
-		    PAGE_SIZE);
+		slabsize = UMA_PCPU_ALLOC_SIZE;
+		keg->uk_ppera = ncpus;
 	} else {
 		slabsize = UMA_SLAB_SIZE;
 		keg->uk_ppera = 1;
@@ -1311,7 +1392,7 @@ keg_small_init(uma_keg_t keg)
 	keg->uk_rsize = rsize;
 
 	KASSERT((keg->uk_flags & UMA_ZONE_PCPU) == 0 ||
-	    keg->uk_rsize < sizeof(struct pcpu),
+	    keg->uk_rsize < UMA_PCPU_ALLOC_SIZE,
 	    ("%s: size %u too large", __func__, keg->uk_rsize));
 
 	if (keg->uk_flags & UMA_ZONE_OFFPAGE)
@@ -1529,6 +1610,8 @@ keg_ctor(void *mem, int size, void *udata, int flags)
 	else if (keg->uk_ppera == 1)
 		keg->uk_allocf = uma_small_alloc;
 #endif
+	else if (keg->uk_flags & UMA_ZONE_PCPU)
+		keg->uk_allocf = pcpu_page_alloc;
 	else
 		keg->uk_allocf = page_alloc;
 #ifdef UMA_MD_SMALL_ALLOC
@@ -1536,6 +1619,9 @@ keg_ctor(void *mem, int size, void *udata, int flags)
 		keg->uk_freef = uma_small_free;
 	else
 #endif
+	if (keg->uk_flags & UMA_ZONE_PCPU)
+		keg->uk_freef = pcpu_page_free;
+	else
 		keg->uk_freef = page_free;
 
 	/*
@@ -2234,13 +2320,19 @@ void *
 uma_zalloc_pcpu_arg(uma_zone_t zone, void *udata, int flags)
 {
 	void *item;
+#ifdef SMP
 	int i;
 
 	MPASS(zone->uz_flags & UMA_ZONE_PCPU);
-	item = uma_zalloc_arg(zone, udata, flags &~ M_ZERO);
+#endif
+	item = uma_zalloc_arg(zone, udata, flags & ~M_ZERO);
 	if (item != NULL && (flags & M_ZERO)) {
-		CPU_FOREACH(i)
+#ifdef SMP
+		for (i = 0; i <= mp_maxid; i++)
 			bzero(zpcpu_get_cpu(item, i), zone->uz_size);
+#else
+		bzero(item, zone->uz_size);
+#endif
 	}
 	return (item);
 }
@@ -2252,7 +2344,9 @@ void
 uma_zfree_pcpu_arg(uma_zone_t zone, void *item, void *udata)
 {
 
+#ifdef SMP
 	MPASS(zone->uz_flags & UMA_ZONE_PCPU);
+#endif
 	uma_zfree_arg(zone, item, udata);
 }
 
@@ -2270,7 +2364,7 @@ uma_zalloc_arg(uma_zone_t zone, void *udata, int flags)
 #endif
 
 	/* Enable entropy collection for RANDOM_ENABLE_UMA kernel option */
-	random_harvest_fast_uma(&zone, sizeof(zone), 1, RANDOM_UMA);
+	random_harvest_fast_uma(&zone, sizeof(zone), RANDOM_UMA);
 
 	/* This is the fast path allocation */
 	CTR4(KTR_UMA, "uma_zalloc_arg thread %x zone %s(%p) flags %d",
@@ -2376,9 +2470,11 @@ zalloc_start:
 	if (bucket != NULL)
 		bucket_free(zone, bucket, udata);
 
-	if (zone->uz_flags & UMA_ZONE_NUMA)
+	if (zone->uz_flags & UMA_ZONE_NUMA) {
 		domain = PCPU_GET(domain);
-	else
+		if (VM_DOMAIN_EMPTY(domain))
+			domain = UMA_ANYDOMAIN;
+	} else
 		domain = UMA_ANYDOMAIN;
 
 	/* Short-circuit for zones without buckets and low memory. */
@@ -2479,7 +2575,7 @@ uma_zalloc_domain(uma_zone_t zone, void *udata, int domain, int flags)
 {
 
 	/* Enable entropy collection for RANDOM_ENABLE_UMA kernel option */
-	random_harvest_fast_uma(&zone, sizeof(zone), 1, RANDOM_UMA);
+	random_harvest_fast_uma(&zone, sizeof(zone), RANDOM_UMA);
 
 	/* This is the fast path allocation */
 	CTR5(KTR_UMA,
@@ -2554,7 +2650,11 @@ keg_fetch_slab(uma_keg_t keg, uma_zone_t zone, int rdomain, int flags)
 		rdomain = 0;
 	rr = rdomain == UMA_ANYDOMAIN;
 	if (rr) {
-		keg->uk_cursor = (keg->uk_cursor + 1) % vm_ndomains;
+		start = keg->uk_cursor;
+		do {
+			keg->uk_cursor = (keg->uk_cursor + 1) % vm_ndomains;
+			domain = keg->uk_cursor;
+		} while (VM_DOMAIN_EMPTY(domain) && domain != start);
 		domain = start = keg->uk_cursor;
 		/* Only block on the second pass. */
 		if ((flags & (M_WAITOK | M_NOVM)) == M_WAITOK)
@@ -2606,8 +2706,9 @@ again:
 			return (slab);
 		}
 		if (rr) {
-			keg->uk_cursor = (keg->uk_cursor + 1) % vm_ndomains;
-			domain = keg->uk_cursor;
+			do {
+				domain = (domain + 1) % vm_ndomains;
+			} while (VM_DOMAIN_EMPTY(domain) && domain != start);
 		}
 	} while (domain != start);
 
@@ -2763,7 +2864,9 @@ zone_import(uma_zone_t zone, void **bucket, int max, int domain, int flags)
 {
 	uma_slab_t slab;
 	uma_keg_t keg;
+#ifdef NUMA
 	int stripe;
+#endif
 	int i;
 
 	slab = NULL;
@@ -2773,7 +2876,9 @@ zone_import(uma_zone_t zone, void **bucket, int max, int domain, int flags)
 		if ((slab = zone->uz_slab(zone, keg, domain, flags)) == NULL)
 			break;
 		keg = slab->us_keg;
+#ifdef NUMA
 		stripe = howmany(max, vm_ndomains);
+#endif
 		while (slab->us_freecount && i < max) { 
 			bucket[i++] = slab_alloc_item(keg, slab);
 			if (keg->uk_free <= keg->uk_reserve)
@@ -2807,6 +2912,8 @@ zone_alloc_bucket(uma_zone_t zone, void *udata, int domain, int flags)
 {
 	uma_bucket_t bucket;
 	int max;
+
+	CTR1(KTR_UMA, "zone_alloc:_bucket domain %d)", domain);
 
 	/* Don't wait for buckets, preserve caller's NOVM setting. */
 	bucket = bucket_alloc(zone, udata, M_NOWAIT | (flags & M_NOVM));
@@ -2875,6 +2982,11 @@ zone_alloc_item(uma_zone_t zone, void *udata, int domain, int flags)
 
 	item = NULL;
 
+	if (domain != UMA_ANYDOMAIN) {
+		/* avoid allocs targeting empty domains */
+		if (VM_DOMAIN_EMPTY(domain))
+			domain = UMA_ANYDOMAIN;
+	}
 	if (zone->uz_import(zone->uz_arg, &item, 1, domain, flags) != 1)
 		goto fail;
 	atomic_add_long(&zone->uz_allocs, 1);
@@ -2935,7 +3047,7 @@ uma_zfree_arg(uma_zone_t zone, void *item, void *udata)
 #endif
 
 	/* Enable entropy collection for RANDOM_ENABLE_UMA kernel option */
-	random_harvest_fast_uma(&zone, sizeof(zone), 1, RANDOM_UMA);
+	random_harvest_fast_uma(&zone, sizeof(zone), RANDOM_UMA);
 
 	CTR2(KTR_UMA, "uma_zfree_arg thread %x zone %s", curthread,
 	    zone->uz_name);
@@ -3035,14 +3147,6 @@ zfree_start:
 	cpu = curcpu;
 	cache = &zone->uz_cpu[cpu];
 
-	/*
-	 * Since we have locked the zone we may as well send back our stats.
-	 */
-	atomic_add_long(&zone->uz_allocs, cache->uc_allocs);
-	atomic_add_long(&zone->uz_frees, cache->uc_frees);
-	cache->uc_allocs = 0;
-	cache->uc_frees = 0;
-
 	bucket = cache->uc_freebucket;
 	if (bucket != NULL && bucket->ub_cnt < bucket->ub_entries) {
 		ZONE_UNLOCK(zone);
@@ -3052,9 +3156,11 @@ zfree_start:
 	/* We are no longer associated with this CPU. */
 	critical_exit();
 
-	if ((zone->uz_flags & UMA_ZONE_NUMA) != 0)
+	if ((zone->uz_flags & UMA_ZONE_NUMA) != 0) {
 		domain = PCPU_GET(domain);
-	else 
+		if (VM_DOMAIN_EMPTY(domain))
+			domain = UMA_ANYDOMAIN;
+	} else
 		domain = 0;
 	zdom = &zone->uz_domain[0];
 
@@ -3119,7 +3225,7 @@ uma_zfree_domain(uma_zone_t zone, void *item, void *udata)
 {
 
 	/* Enable entropy collection for RANDOM_ENABLE_UMA kernel option */
-	random_harvest_fast_uma(&zone, sizeof(zone), 1, RANDOM_UMA);
+	random_harvest_fast_uma(&zone, sizeof(zone), RANDOM_UMA);
 
 	CTR2(KTR_UMA, "uma_zfree_domain thread %x zone %s", curthread,
 	    zone->uz_name);
@@ -3501,7 +3607,9 @@ uma_prealloc(uma_zone_t zone, int items)
 		dom = &keg->uk_domain[slab->us_domain];
 		LIST_INSERT_HEAD(&dom->ud_free_slab, slab, us_link);
 		slabs--;
-		domain = (domain + 1) % vm_ndomains;
+		do {
+			domain = (domain + 1) % vm_ndomains;
+		} while (VM_DOMAIN_EMPTY(domain));
 	}
 	KEG_UNLOCK(keg);
 }
@@ -3588,34 +3696,25 @@ uma_zone_exhausted_nolock(uma_zone_t zone)
 void *
 uma_large_malloc_domain(vm_size_t size, int domain, int wait)
 {
-	struct vmem *arena;
 	vm_offset_t addr;
 	uma_slab_t slab;
 
-#if VM_NRESERVLEVEL > 0
-	if (__predict_true((wait & M_EXEC) == 0))
-		arena = kernel_arena;
-	else
-		arena = kernel_rwx_arena;
-#else
-	arena = kernel_arena;
-#endif
-
+	if (domain != UMA_ANYDOMAIN) {
+		/* avoid allocs targeting empty domains */
+		if (VM_DOMAIN_EMPTY(domain))
+			domain = UMA_ANYDOMAIN;
+	}
 	slab = zone_alloc_item(slabzone, NULL, domain, wait);
 	if (slab == NULL)
 		return (NULL);
 	if (domain == UMA_ANYDOMAIN)
-		addr = kmem_malloc(arena, size, wait);
+		addr = kmem_malloc(size, wait);
 	else
-		addr = kmem_malloc_domain(arena, domain, size, wait);
+		addr = kmem_malloc_domain(domain, size, wait);
 	if (addr != 0) {
 		vsetslab(addr, slab);
 		slab->us_data = (void *)addr;
 		slab->us_flags = UMA_SLAB_KERNEL | UMA_SLAB_MALLOC;
-#if VM_NRESERVLEVEL > 0
-		if (__predict_false(arena == kernel_rwx_arena))
-			slab->us_flags |= UMA_SLAB_KRWX;
-#endif
 		slab->us_size = size;
 		slab->us_domain = vm_phys_domain(PHYS_TO_VM_PAGE(
 		    pmap_kextract(addr)));
@@ -3637,19 +3736,10 @@ uma_large_malloc(vm_size_t size, int wait)
 void
 uma_large_free(uma_slab_t slab)
 {
-	struct vmem *arena;
 
 	KASSERT((slab->us_flags & UMA_SLAB_KERNEL) != 0,
 	    ("uma_large_free:  Memory not allocated with uma_large_malloc."));
-#if VM_NRESERVLEVEL > 0
-	if (__predict_true((slab->us_flags & UMA_SLAB_KRWX) == 0))
-		arena = kernel_arena;
-	else
-		arena = kernel_rwx_arena;
-#else
-	arena = kernel_arena;
-#endif
-	kmem_free(arena, (vm_offset_t)slab->us_data, slab->us_size);
+	kmem_free((vm_offset_t)slab->us_data, slab->us_size);
 	uma_total_dec(slab->us_size);
 	zone_free_item(slabzone, slab, NULL, SKIP_NONE);
 }

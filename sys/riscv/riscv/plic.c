@@ -5,8 +5,9 @@
  * All rights reserved.
  *
  * This software was developed by SRI International and the University of
- * Cambridge Computer Laboratory under DARPA/AFRL contract FA8750-10-C-0237
- * ("CTSRD"), as part of the DARPA CRASH research programme.
+ * Cambridge Computer Laboratory (Department of Computer Science and
+ * Technology) under DARPA contract HR0011-18-C-0016 ("ECATS"), as part of the
+ * DARPA SSITH research programme.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -217,6 +218,7 @@ plic_attach(device_t dev)
 		if (error != 0)
 			return (error);
 
+		WR4(sc, PLIC_PRIORITY(irq), 0);
 		WR4(sc, PLIC_ENABLE(irq, cpu), 0);
 	}
 	WR4(sc, PLIC_THRESHOLD(cpu), 0);
