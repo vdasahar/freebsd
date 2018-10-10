@@ -187,6 +187,12 @@ typedef	__uintptr_t	uintptr_t;
  * This range applies to all socket option levels.  New socket options
  * in FreeBSD should always use an option value less than SO_VENDOR.
  */
+
+#define	SO_VMCI_BUFFER_SIZE	0
+#define	SO_VMCI_BUFFER_MIN_SIZE	1
+#define	SO_VMCI_BUFFER_MAX_SIZE	2
+#define	SO_VMCI_CONNECT_TIMEOUT	6
+
 #if __BSD_VISIBLE
 #define	SO_VENDOR	0x80000000
 #endif
@@ -264,7 +270,8 @@ struct accept_filter_arg {
 #define	AF_IEEE80211	37		/* IEEE 802.11 protocol */
 #define	AF_INET_SDP	40		/* OFED Socket Direct Protocol ipv4 */
 #define	AF_INET6_SDP	42		/* OFED Socket Direct Protocol ipv6 */
-#define	AF_MAX		42
+#define	AF_VSOCK	44		/* VMware vsock protocol */
+#define	AF_MAX		44
 /*
  * When allocating a new AF_ constant, please only allocate
  * even numbered constants for FreeBSD until 134 as odd numbered AF_
@@ -389,6 +396,7 @@ struct sockproto {
 #define	PF_IEEE80211	AF_IEEE80211
 #define	PF_INET_SDP	AF_INET_SDP
 #define	PF_INET6_SDP	AF_INET6_SDP
+#define	PF_VSOCK	AF_VSOCK
 
 #define	PF_MAX		AF_MAX
 

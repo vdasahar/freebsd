@@ -118,6 +118,7 @@ struct l_cmsghdr {
 #define	LINUX_AF_IPX		4
 #define	LINUX_AF_APPLETALK	5
 #define	LINUX_AF_INET6		10
+#define	LINUX_AF_VSOCK		44
 
 /* Supported socket types */
 
@@ -206,6 +207,11 @@ int linux_accept(struct thread *td, struct linux_accept_args *args);
 #endif
 #define	LINUX_SO_TIMESTAMP	29
 #define	LINUX_SO_ACCEPTCONN	30
+
+#define	LINUX_SO_VMCI_BUFFER_SIZE	0
+#define	LINUX_SO_VMCI_BUFFER_MIN_SIZE	1
+#define	LINUX_SO_VMCI_BUFFER_MAX_SIZE	2
+#define	LINUX_SO_VMCI_CONNECT_TIMEOUT	6
 
 /* Socket options */
 #define	LINUX_IP_TOS		1

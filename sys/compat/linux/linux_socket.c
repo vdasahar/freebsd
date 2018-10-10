@@ -212,6 +212,8 @@ linux_to_bsd_domain(int domain)
 		return (AF_IPX);
 	case LINUX_AF_APPLETALK:
 		return (AF_APPLETALK);
+	case LINUX_AF_VSOCK:
+		return (AF_VSOCK);
 	}
 	return (-1);
 }
@@ -235,6 +237,8 @@ bsd_to_linux_domain(int domain)
 		return (LINUX_AF_IPX);
 	case AF_APPLETALK:
 		return (LINUX_AF_APPLETALK);
+	case AF_VSOCK:
+		return (LINUX_AF_VSOCK);
 	}
 	return (-1);
 }
@@ -407,6 +411,23 @@ linux_to_bsd_tcp_sockopt(int opt)
 		return (TCP_KEEPCNT);
 	case LINUX_TCP_MD5SIG:
 		return (TCP_MD5SIG);
+	}
+	return (-1);
+}
+
+static int
+linux_to_bsd_vsock_sockopt(int opt)
+{
+
+	switch (opt) {
+	case LINUX_SO_VMCI_BUFFER_SIZE:
+		return (SO_VMCI_BUFFER_SIZE);
+	case LINUX_SO_VMCI_BUFFER_MIN_SIZE:
+		return (SO_VMCI_BUFFER_MIN_SIZE);
+	case LINUX_SO_VMCI_BUFFER_MAX_SIZE:
+		return (SO_VMCI_BUFFER_MAX_SIZE);
+	case LINUX_SO_VMCI_CONNECT_TIMEOUT:
+		return (SO_VMCI_CONNECT_TIMEOUT);
 	}
 	return (-1);
 }
@@ -1557,6 +1578,9 @@ linux_setsockopt(struct thread *td, struct linux_setsockopt_args *args)
 	case IPPROTO_TCP:
 		name = linux_to_bsd_tcp_sockopt(args->optname);
 		break;
+	case AF_VSOCK:
+		name = linux_to_bsd_vsock_sockopt(args->optname);
+		break;
 	default:
 		name = -1;
 		break;
@@ -1652,6 +1676,9 @@ linux_getsockopt(struct thread *td, struct linux_getsockopt_args *args)
 		break;
 	case IPPROTO_TCP:
 		name = linux_to_bsd_tcp_sockopt(args->optname);
+		break;
+	case AF_VSOCK:
+		name = linux_to_bsd_vsock_sockopt(args->optname);
 		break;
 	default:
 		name = -1;

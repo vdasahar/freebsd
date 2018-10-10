@@ -3119,6 +3119,8 @@ integer:
 				error = ENOPROTOOPT;
 			break;
 		}
+		if (error == 0 && so->so_proto->pr_ctloutput != NULL)
+			(void)(*so->so_proto->pr_ctloutput)(so, sopt);
 	}
 #ifdef MAC
 bad:

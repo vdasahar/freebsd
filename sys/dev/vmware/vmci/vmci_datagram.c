@@ -495,6 +495,10 @@ vmci_datagram_dispatch(vmci_id context_id, struct vmci_datagram *dg)
 		return (VMCI_ERROR_INVALID_ARGS);
 	}
 
+	/* If no source context then use the current context. */
+	if (VMCI_INVALID_ID == dg->src.context)
+	    dg->src.context = vmci_get_context_id();
+
 	return (vmci_datagram_dispatch_as_guest(dg));
 }
 
